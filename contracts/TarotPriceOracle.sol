@@ -10,8 +10,10 @@ contract TarotPriceOracle is ITarotPriceOracle {
     uint32 public constant MIN_T = 1200;
 
     struct Pair {
-        uint256 priceCumulativeSlotA;
-        uint256 priceCumulativeSlotB;
+        uint256 reserve0CumulativeSlotA;
+        uint256 reserve1CumulativeSlotA;
+        uint256 reserve0CumulativeSlotB;
+        uint256 reserve1CumulativeSlotB;
         uint32 lastUpdateSlotA;
         uint32 lastUpdateSlotB;
         bool latestIsSlotA;
@@ -21,7 +23,8 @@ contract TarotPriceOracle is ITarotPriceOracle {
 
     event PriceUpdate(
         address indexed pair,
-        uint256 priceCumulative,
+        uint256 reserve0Cumulative,
+        uint256 reserve1Cumulative,
         uint32 blockTimestamp,
         bool latestIsSlotA
     );
@@ -31,18 +34,12 @@ contract TarotPriceOracle is ITarotPriceOracle {
         return uint224(input);
     }
 
-    function getPriceCumulativeCurrent(address uniswapV2Pair)
+    function getReservesCumulativeCurrent(address uniswapV2Pair)
         internal
         view
-        returns (uint256 priceCumulative)
+        returns (uint256 r0, uint256 r1, uint256 t)
     {
-        priceCumulative = IUniswapV2Pair(uniswapV2Pair).price0CumulativeLast();
-        (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast) =
-            IUniswapV2Pair(uniswapV2Pair).getReserves();
-        uint224 priceLatest = UQ112x112.encode(reserve1).uqdiv(reserve0);
-        uint32 timeElapsed = getBlockTimestamp() - blockTimestampLast; // overflow is desired
-        // * never overflows, and + overflow is desired
-        priceCumulative += uint256(priceLatest) * timeElapsed;
+        (r0, r1, t) = IUniswapV2Pair(uniswapV2Pair).currentCumulativePrices();
     }
 
     function initialize(address uniswapV2Pair) external {
@@ -52,19 +49,20 @@ contract TarotPriceOracle is ITarotPriceOracle {
             "TarotPriceOracle: ALREADY_INITIALIZED"
         );
 
-        uint256 priceCumulativeCurrent =
-            getPriceCumulativeCurrent(uniswapV2Pair);
-        uint32 blockTimestamp = getBlockTimestamp();
-        pairStorage.priceCumulativeSlotA = priceCumulativeCurrent;
-        pairStorage.priceCumulativeSlotB = priceCumulativeCurrent;
-        pairStorage.lastUpdateSlotA = blockTimestamp;
-        pairStorage.lastUpdateSlotB = blockTimestamp;
+        (uint256 r0, uint256 r1, uint256 blockTimestamp) =
+            getReservesCumulativeCurrent(uniswapV2Pair);
+        uint32 _blockTimestamp = uint32(blockTimestamp % 2**32);
+        pairStorage.reserve0CumulativeSlotA = r0;
+        pairStorage.reserve1CumulativeSlotA = r1;
+        pairStorage.lastUpdateSlotA = _blockTimestamp;
+        pairStorage.lastUpdateSlotB = _blockTimestamp;
         pairStorage.latestIsSlotA = true;
         pairStorage.initialized = true;
         emit PriceUpdate(
             uniswapV2Pair,
-            priceCumulativeCurrent,
-            blockTimestamp,
+            r0,
+            r1,
+            _blockTimestamp,
             true
         );
     }
@@ -80,26 +78,32 @@ contract TarotPriceOracle is ITarotPriceOracle {
         uint32 blockTimestamp = getBlockTimestamp();
         uint32 lastUpdateTimestamp =
             pair.latestIsSlotA ? pair.lastUpdateSlotA : pair.lastUpdateSlotB;
-        uint256 priceCumulativeCurrent =
-            getPriceCumulativeCurrent(uniswapV2Pair);
-        uint256 priceCumulativeLast;
+        (uint256 r0CumulativeCurrent, uint256 r1CumulativeCurrent, ) =
+            getReservesCumulativeCurrent(uniswapV2Pair);
+
+        uint256 r0CumulativeLast = pair.reserve0CumulativeSlotA;
+        uint256 r1CumulativeLast = pair.reserve1CumulativeSlotA;
 
         if (blockTimestamp - lastUpdateTimestamp >= MIN_T) {
             // update price
-            priceCumulativeLast = pair.latestIsSlotA
-                ? pair.priceCumulativeSlotA
-                : pair.priceCumulativeSlotB;
             if (pair.latestIsSlotA) {
-                pairStorage.priceCumulativeSlotB = priceCumulativeCurrent;
+                r0CumulativeLast = pair.reserve0CumulativeSlotA;
+                r1CumulativeLast = pair.reserve1CumulativeSlotA;
+                pairStorage.reserve0CumulativeSlotB = r0CumulativeCurrent;
+                pairStorage.reserve1CumulativeSlotB = r1CumulativeCurrent;
                 pairStorage.lastUpdateSlotB = blockTimestamp;
             } else {
-                pairStorage.priceCumulativeSlotA = priceCumulativeCurrent;
+                r0CumulativeLast = pair.reserve0CumulativeSlotB;
+                r1CumulativeLast = pair.reserve1CumulativeSlotB;
+                pairStorage.reserve0CumulativeSlotA = r0CumulativeCurrent;
+                pairStorage.reserve1CumulativeSlotA = r1CumulativeCurrent;
                 pairStorage.lastUpdateSlotA = blockTimestamp;
             }
             pairStorage.latestIsSlotA = !pair.latestIsSlotA;
             emit PriceUpdate(
                 uniswapV2Pair,
-                priceCumulativeCurrent,
+                r0CumulativeLast,
+                r1CumulativeLast,
                 blockTimestamp,
                 !pair.latestIsSlotA
             );
@@ -108,19 +112,29 @@ contract TarotPriceOracle is ITarotPriceOracle {
             lastUpdateTimestamp = pair.latestIsSlotA
                 ? pair.lastUpdateSlotB
                 : pair.lastUpdateSlotA;
-            priceCumulativeLast = pair.latestIsSlotA
-                ? pair.priceCumulativeSlotB
-                : pair.priceCumulativeSlotA;
+            r0CumulativeLast = pair.latestIsSlotA
+                ? pair.reserve0CumulativeSlotB
+                : pair.reserve0CumulativeSlotA;
+            r1CumulativeLast = pair.latestIsSlotA
+                ? pair.reserve1CumulativeSlotB
+                : pair.reserve1CumulativeSlotA;
         }
 
         T = blockTimestamp - lastUpdateTimestamp; // overflow is desired
         require(T >= MIN_T, "TarotPriceOracle: NOT_READY"); //reverts only if the pair has just been initialized
         // / is safe, and - overflow is desired
-        price = toUint224((priceCumulativeCurrent - priceCumulativeLast) / T);
+        require(r0CumulativeCurrent > r0CumulativeLast);
+        require(r1CumulativeCurrent > r1CumulativeLast);
+        uint256 r0Calculate = r0CumulativeCurrent - r0CumulativeLast;
+        uint256 r1Calculate = r1CumulativeCurrent - r1CumulativeLast;
+        require(r0Calculate < 2**112, "TarotPriceOracle: U112 Overflow");
+        require(r1Calculate < 2**112, "TarotPriceOracle: U112 Overflow");
+        uint112 _r0 = uint112(r0Calculate);
+        uint112 _r1 = uint112(r1Calculate);
+        price = UQ112x112.encode(_r1).uqdiv(_r0);
     }
 
     /*** Utilities ***/
-
     function getBlockTimestamp() public view returns (uint32) {
         return uint32(block.timestamp % 2**32);
     }
