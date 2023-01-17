@@ -7,7 +7,7 @@ import "./interfaces/ITarotPriceOracle.sol";
 contract TarotPriceOracle is ITarotPriceOracle {
     using UQ112x112 for uint224;
 
-    uint32 public constant MIN_T = 1200;
+    uint32 public constant MIN_T = 10;
 
     struct Pair {
         uint256 reserve0CumulativeSlotA;
